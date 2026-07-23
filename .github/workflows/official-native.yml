@@ -101,20 +101,22 @@ jobs:
           cp "bazel-bin/python/_dds3.${{ matrix.ext }}" "dist/dds3/_dds3.${{ matrix.ext }}"
           ls -la dist/dds3
 
+      # Run the repo's own Python tests under the SAME hermetic interpreter the
+      # extension was built against. Importing the built module with whatever
+      # `python` happens to be on the runner's PATH is not a valid check: on
+      # macOS it fails with "symbol not found in flat namespace
+      # '__PyThreadState_UncheckedGet'" purely from the interpreter mismatch.
       - name: Smoke-test the extension
         shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
         run: |
-          cd dist && python -c "
-          import sys; sys.path.insert(0, '.')
-          import dds3
-          pbn = 'N:AKT4.5.762.J9864 8.AT98.A54.KT753 97652.K632.K8.AQ QJ3.QJ74.QJT93.2'
-          ctx = dds3.SolverContext()
-          r = dds3.solve_board_pbn(pbn, trump=4, first=3,
-                                   current_trick_suit=(0,0,0), current_trick_rank=(0,0,0),
-                                   target=-1, solutions=3, mode=1, context=ctx)
-          assert r['cards'] > 0, r
-          print('dds3 smoke OK, cards =', r['cards'])
-          "
+          PYVER="${{ inputs.python_version || '3.12' }}"
+          bazel test -c opt \
+            --@rules_python//python/config_settings:python_version=${PYVER} \
+            --test_output=errors \
+            //python:python_interface_smoke_test //python:context_reuse_test
 
       - name: Upload native shared library artifact
         uses: actions/upload-artifact@v4
