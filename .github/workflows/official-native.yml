@@ -1,0 +1,151 @@
+name: Build official DDS 3 native artifacts
+
+# Builds the two native artifacts our downstream consumers vendor, straight from
+# an unmodified upstream tree (no fork patches):
+#
+#   1. //jni:dds_shared   -> dds.dll / libdds.so / libdds.dylib
+#      The flat C ABI shared library. Exports the whole legacy C API plus the
+#      dds_c_* solver-context entries. Consumed by the C# Brill engine via
+#      P/Invoke (DllImport("dds")).
+#
+#   2. //python:_dds3     -> _dds3.pyd / _dds3.so
+#      The dds3 CPython extension consumed by BEN. Exposes dds3.SolverContext
+#      for warm transposition-table reuse. CPython extension modules are
+#      version-locked, so python_version must match the consumer's interpreter
+#      (BEN's Docker image runs 3.12).
+#
+# Each platform uploads: dds-native-<label> and dds3-<label>. The collect job
+# assembles a single tree laid out the way BEN's bin/ expects.
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "CPython version to build the _dds3 extension for"
+        default: "3.12"
+        type: string
+  # Dispatch-only workflows are not selectable until the file reaches the default
+  # branch, so also fire on pushes to the artifact branch itself.
+  push:
+    branches:
+      - official-dds3-artifacts
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }} (py${{ inputs.python_version || '3.12' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: win
+            ext: pyd
+            sharedlib: dds.dll
+          - os: ubuntu-latest
+            label: linux
+            ext: so
+            sharedlib: libdds.so
+          - os: macos-26
+            label: darwin
+            ext: so
+            sharedlib: libdds.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bazelisk
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-version: "1.29.0"
+
+      - name: Build dds shared library (C ABI)
+        shell: bash
+        env:
+          # On the Windows runner `shell: bash` is Git Bash (MSYS), which would
+          # rewrite the leading // of a //target label to /target and break the
+          # build. Disable that path conversion (no-op on Linux/macOS).
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: bazel build -c opt //jni:dds_shared
+
+      - name: Build _dds3 (CPython extension)
+        shell: bash
+        env:
+          MSYS_NO_PATHCONV: "1"
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          PYVER="${{ inputs.python_version || '3.12' }}"
+          bazel build -c opt \
+            --@rules_python//python/config_settings:python_version=${PYVER} \
+            //python:_dds3
+
+      - name: Assemble native shared library
+        shell: bash
+        run: |
+          mkdir -p dist/native
+          cp "bazel-bin/jni/${{ matrix.sharedlib }}" "dist/native/${{ matrix.sharedlib }}"
+          if [ "${{ matrix.label }}" = "win" ]; then
+            cp "bazel-bin/jni/dds_shared.if.lib" "dist/native/dds.lib" || true
+          fi
+          ls -la dist/native
+
+      - name: Assemble vendorable dds3 package
+        shell: bash
+        run: |
+          mkdir -p dist/dds3
+          cp python/dds3/__init__.py dist/dds3/__init__.py
+          cp "bazel-bin/python/_dds3.${{ matrix.ext }}" "dist/dds3/_dds3.${{ matrix.ext }}"
+          ls -la dist/dds3
+
+      - name: Smoke-test the extension
+        shell: bash
+        run: |
+          cd dist && python -c "
+          import sys; sys.path.insert(0, '.')
+          import dds3
+          pbn = 'N:AKT4.5.762.J9864 8.AT98.A54.KT753 97652.K632.K8.AQ QJ3.QJ74.QJT93.2'
+          ctx = dds3.SolverContext()
+          r = dds3.solve_board_pbn(pbn, trump=4, first=3,
+                                   current_trick_suit=(0,0,0), current_trick_rank=(0,0,0),
+                                   target=-1, solutions=3, mode=1, context=ctx)
+          assert r['cards'] > 0, r
+          print('dds3 smoke OK, cards =', r['cards'])
+          "
+
+      - name: Upload native shared library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dds-native-${{ matrix.label }}
+          path: dist/native/
+
+      - name: Upload dds3 package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dds3-${{ matrix.label }}
+          path: dist/dds3/
+
+  collect:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Organize release tree (BEN bin/ layout + native libs)
+        run: |
+          for p in win linux darwin; do
+            mkdir -p "release/dds3-$p/dds3" "release/native-$p"
+            cp -r artifacts/dds3-$p/*       "release/dds3-$p/dds3/"
+            cp -r artifacts/dds-native-$p/* "release/native-$p/"
+          done
+          find release -type f
+      - name: Upload combined
+        uses: actions/upload-artifact@v4
+        with:
+          name: dds-official-all-platforms
+          path: release/
