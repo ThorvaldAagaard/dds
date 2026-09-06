@@ -25,6 +25,8 @@
             refreshDdTable
             refreshOpeningLeadTricks
             scheduleDealSolve
+            setDealSolveDebounceMs
+            scheduleDealSolveDebounced
             fourthHandFillState
             updateActionButtons
             sanitizeSuitHolding
@@ -90,6 +92,13 @@ let lastDdTablePbn = null;
 let solveQueue = Promise.resolve();
 let dealSolveEpoch = 0;
 let dealSolveQueued = false;
+// Delay WASM work after hand edits so typing on a complete deal does not
+// freeze the UI on every keystroke (sync ccall). Contract clicks stay immediate.
+let dealSolveDebounceMs = 250;
+let dealSolveDebounceTimer = null;
+// Track completeness so the first transition to a full deal solves immediately
+// (auto-fill / final pip), while further edits of that deal stay debounced.
+let lastDealWasComplete = false;
 
 function enqueueSolve(task) {
     const run = solveQueue.then(task, task);
@@ -99,10 +108,39 @@ function enqueueSolve(task) {
     return run;
 }
 
+function setDealSolveDebounceMs(ms) {
+    dealSolveDebounceMs = ms;
+}
+
+function scheduleDealSolveDebounced() {
+    if (dealSolveDebounceTimer != null) {
+        clearTimeout(dealSolveDebounceTimer);
+        dealSolveDebounceTimer = null;
+    }
+
+    if (dealSolveDebounceMs <= 0) {
+        return scheduleDealSolve();
+    }
+
+    dealSolveDebounceTimer = setTimeout(() => {
+        dealSolveDebounceTimer = null;
+        scheduleDealSolve();
+    }, dealSolveDebounceMs);
+
+    return solveQueue;
+}
+
 // Coalesce DD-table + lead solves onto one queued job so rapid hand edits and
 // contract clicks cannot interleave CalcDDtable with SolveBoard, and so
 // intermediate schedules do not each add a stale promise-chain callback.
 function scheduleDealSolve() {
+    // A direct schedule (contract click, etc.) supersedes a pending debounced
+    // hand-edit solve so we do not fire a redundant trailing job afterward.
+    if (dealSolveDebounceTimer != null) {
+        clearTimeout(dealSolveDebounceTimer);
+        dealSolveDebounceTimer = null;
+    }
+
     dealSolveEpoch += 1;
 
     if (dealSolveQueued) {
@@ -2043,7 +2081,19 @@ function updateActionButtons(activeElement) {
 
     updateHandCardDisplays(hands);
 
-    void scheduleDealSolve();
+    const dealComplete = allHandsHaveThirteenCards(hands) &&
+        inputIsValid(hands).length === 0;
+
+    // Solve as soon as the deal first becomes complete (fourth-hand auto-fill
+    // or the final pip). Debounce only subsequent edits of a complete deal so
+    // typing does not sync-ccall on every keystroke.
+    if (dealComplete && !lastDealWasComplete) {
+        void scheduleDealSolve();
+    } else {
+        void scheduleDealSolveDebounced();
+    }
+
+    lastDealWasComplete = dealComplete;
 }
 
 function collectHands() {

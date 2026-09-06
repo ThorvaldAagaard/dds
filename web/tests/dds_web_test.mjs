@@ -233,6 +233,7 @@ function loadDdsWeb(document, extras = {}) {
         Promise,
         Error,
         setTimeout,
+        clearTimeout,
         performance: {
             now() {
                 return 0;
@@ -242,6 +243,11 @@ function loadDdsWeb(document, extras = {}) {
     };
     const context = createContext(sandbox);
     runInContext(code, context, { filename: "dds_web.js" });
+    // Existing tests expect hand edits to schedule immediately; debounce is
+    // covered by dedicated tests that opt into a non-zero delay.
+    if (typeof context.setDealSolveDebounceMs === "function") {
+        context.setDealSolveDebounceMs(0);
+    }
     return context;
 }
 
@@ -692,6 +698,107 @@ test("rapid scheduleDealSolve does not enqueue one queue job per call", async ()
     // Trailing epoch may re-run work inside the same job, but still one enqueue.
     assert.equal(enqueued, enqueuedWhileBlocked);
     assert.ok(ddRuns >= 2);
+});
+
+test("hand-edit solves are debounced so rapid typing does not start WASM immediately", async () => {
+    // Arrange: complete deal; each keystroke would otherwise sync-ccall and freeze.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(50);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    // Act: burst of hand edits (as when typing into South on a full deal).
+    document.setValue("south_spades", "972A");
+    ctx.updateActionButtons(document.element("south_spades"));
+    document.setValue("south_spades", "972AK");
+    ctx.updateActionButtons(document.element("south_spades"));
+    document.setValue("south_spades", "972");
+    ctx.updateActionButtons(document.element("south_spades"));
+
+    // Assert: no solve until the debounce window elapses, then one trailing run.
+    assert.equal(ddRuns, 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(ddRuns, 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(ddRuns, 1);
+});
+
+test("contract selection still schedules a deal solve immediately", async () => {
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+    ctx.fillFormWithPartScoreTestData();
+    // Let the debounced fillForm solve fire, then reset.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    ddRuns = 0;
+
+    ctx.handleResultTableClick({
+        target: {
+            closest() {
+                return document.element("result-table").rows[3].cells[5];
+            },
+        },
+    });
+
+    // Contract click must not wait for the hand-edit debounce.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+});
+
+test("fourth-hand auto-fill schedules a solve immediately despite debounce", async () => {
+    // Arrange: three complete hands; completing the third triggers auto-fill.
+    const document = threeHandsPartScoreDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+
+    // Act
+    ctx.updateActionButtons();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert: West is filled and the DD solve does not wait for debounce.
+    assert.equal(document.element("west_spades").value, "K643");
+    assert.equal(ddRuns, 1);
+});
+
+test("completing the fourth hand manually schedules a solve immediately", async () => {
+    // Arrange: South is one card short of a complete deal.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    document.setValue("south_spades", "97"); // was 972; now 12 cards in South
+    ctx.updateActionButtons(document.element("south_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+
+    // Act: type the final pip that restores 13 cards.
+    document.setValue("south_spades", "972");
+    ctx.updateActionButtons(document.element("south_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert
+    assert.equal(ddRuns, 1);
 });
 
 test("pageLoad shows valid pips", () => {
