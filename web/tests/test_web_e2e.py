@@ -147,8 +147,8 @@ class DdsWebHtmlE2eTest(unittest.TestCase):
                     expected,
                     msg=f"{direction}/{denomination}",
                 )
-        result_text = page.locator("#result").inner_text()
-        self.assertEqual(result_text.strip(), "")
+        result_text = page.locator("#result").inner_text().strip()
+        self.assertRegex(result_text, r"^Solved in \d+ ms\.$")
 
     def test_page_load_shows_valid_pips(self) -> None:
         page, errors = self._open_page(self.site_dir.joinpath("dds_web.html").as_uri())

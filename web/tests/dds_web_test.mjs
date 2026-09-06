@@ -225,7 +225,7 @@ function createMockDocument(initialValues = {}) {
     return documentRef;
 }
 
-function loadDdsWeb(document) {
+function loadDdsWeb(document, extras = {}) {
     const code = readFileSync(findDdsWebJsPath(), "utf8");
     const sandbox = {
         document,
@@ -233,6 +233,12 @@ function loadDdsWeb(document) {
         Promise,
         Error,
         setTimeout,
+        performance: {
+            now() {
+                return 0;
+            },
+        },
+        ...extras,
     };
     const context = createContext(sandbox);
     runInContext(code, context, { filename: "dds_web.js" });
@@ -1293,6 +1299,51 @@ test("refreshDdTable clears the results table when the deal is incomplete", () =
     // Assert
     assert.equal(cell.innerHTML, "");
     assert.equal(document.element("result").innerHTML, "");
+});
+
+test("formatSolveTimeMs rounds wall time to whole milliseconds", () => {
+    const ctx = loadDdsWeb(createMockDocument());
+
+    assert.equal(ctx.formatSolveTimeMs(0), "Solved in 0 ms.");
+    assert.equal(ctx.formatSolveTimeMs(0.4), "Solved in 0 ms.");
+    assert.equal(ctx.formatSolveTimeMs(0.5), "Solved in 1 ms.");
+    assert.equal(ctx.formatSolveTimeMs(12.3), "Solved in 12 ms.");
+    assert.equal(ctx.formatSolveTimeMs(41.9), "Solved in 42 ms.");
+});
+
+test("refreshDdTable shows wall solve time in ms after a successful solve", async () => {
+    // Arrange: full part-score deal; mock WASM and a clock that advances 12.4 ms.
+    let clock = 1000;
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document, {
+        performance: {
+            now() {
+                return clock;
+            },
+        },
+    });
+    ctx.fillFormWithPartScoreTestData();
+    ctx.loadDdsModule = async () => ({
+        _malloc: () => 0,
+        _free() {},
+        ccall() {
+            clock += 12.4;
+            return 1;
+        },
+        getValue() {
+            return 7;
+        },
+    });
+
+    // Act
+    await ctx.refreshDdTable();
+
+    // Assert
+    assert.equal(document.element("result").innerHTML, "Solved in 12 ms.");
+    assert.equal(
+        String(document.element("result-table").rows[1].cells[1].innerHTML),
+        "7"
+    );
 });
 
 test("updateActionButtons displays all 52 cards in the deck status", () => {
@@ -3060,11 +3111,28 @@ test("result table lives in the hand diagram southeast corner", () => {
         /result-table-hint[\s\S]*?id="result-table"/
     );
     assert.match(afterSe, /id="result-table"/);
+    // Solve status (Computing… / wall time / errors) sits under the table in
+    // the SE cell so it is visible next to the results users are watching.
+    assert.match(
+        afterSe,
+        /id="result-table"[\s\S]*?<p\b[^>]*\bid="result"[^>]*>/
+    );
+    assert.match(
+        afterSe,
+        /<p\b[^>]*\bid="result"[^>]*\baria-live="polite"/
+    );
+    // Only one #result, and it is not left below the diagram.
+    assert.equal((html.match(/\bid="result"/g) || []).length, 1);
+    assert.doesNotMatch(
+        html.slice(html.indexOf("</div>\n    </div>\n    </div>")),
+        /id="result"/
+    );
     // SE cell must be readable (not aria-hidden) and sized for the table.
     assert.doesNotMatch(seOpen[0], /aria-hidden="true"/);
     assert.match(css, /\.grid-item\.grid-filler-se\s*\{[^}]*font-size:/s);
     assert.match(css, /\.grid-item\.grid-filler-se\s*\{[^}]*flex-direction:\s*column/s);
     assert.match(css, /\.result-table-hint\s*\{/s);
+    assert.match(css, /#result\s*\{/s);
 });
 
 test("contract status lives in the hand diagram northeast corner", () => {

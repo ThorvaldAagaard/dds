@@ -65,6 +65,7 @@
             pipFromDdsRank
             leadTricksMapFromSolverOutput
             wasmSolveEnvironmentError
+            formatSolveTimeMs
             */
 
 // It's also useful to pass the code through
@@ -2156,6 +2157,11 @@ function clear_results() {
     }
 }
 
+/** Format wall elapsed time for the status line (whole milliseconds). */
+function formatSolveTimeMs(elapsedMs) {
+    return "Solved in " + Math.round(elapsedMs) + " ms.";
+}
+
 async function refreshDdTable() {
     const requestId = ++ddTableRequestId;
     const result = document.getElementById("result");
@@ -2203,12 +2209,14 @@ async function refreshDdTable() {
         const outPtr = module._malloc(20 * 4);
 
         try {
+            const startedAt = performance.now();
             const rc = module.ccall(
                 "dds_web_calc_table",
                 "number",
                 ["string", "number"],
                 [pbn, outPtr]
             );
+            const elapsedMs = performance.now() - startedAt;
 
             if (requestId !== ddTableRequestId) {
                 return;
@@ -2240,7 +2248,7 @@ async function refreshDdTable() {
             lastDdTablePbn = pbn;
 
             if (result) {
-                result.innerHTML = "";
+                result.innerHTML = formatSolveTimeMs(elapsedMs);
             }
         } finally {
             module._free(outPtr);
