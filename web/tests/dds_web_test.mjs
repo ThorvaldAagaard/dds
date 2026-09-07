@@ -225,7 +225,7 @@ function createMockDocument(initialValues = {}) {
     return documentRef;
 }
 
-function loadDdsWeb(document) {
+function loadDdsWeb(document, extras = {}) {
     const code = readFileSync(findDdsWebJsPath(), "utf8");
     const sandbox = {
         document,
@@ -233,9 +233,21 @@ function loadDdsWeb(document) {
         Promise,
         Error,
         setTimeout,
+        clearTimeout,
+        performance: {
+            now() {
+                return 0;
+            },
+        },
+        ...extras,
     };
     const context = createContext(sandbox);
     runInContext(code, context, { filename: "dds_web.js" });
+    // Existing tests expect hand edits to schedule immediately; debounce is
+    // covered by dedicated tests that opt into a non-zero delay.
+    if (typeof context.setDealSolveDebounceMs === "function") {
+        context.setDealSolveDebounceMs(0);
+    }
     return context;
 }
 
@@ -686,6 +698,207 @@ test("rapid scheduleDealSolve does not enqueue one queue job per call", async ()
     // Trailing epoch may re-run work inside the same job, but still one enqueue.
     assert.equal(enqueued, enqueuedWhileBlocked);
     assert.ok(ddRuns >= 2);
+});
+
+test("subsequent edits of a still-complete deal are debounced", async () => {
+    // Arrange: complete deal; reordering pips keeps the deal complete so each
+    // keystroke would otherwise schedule a solve immediately.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(50);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    // Act: burst of still-complete edits (reorder South's spade holding).
+    document.setValue("south_spades", "927");
+    ctx.updateActionButtons(document.element("south_spades"));
+    document.setValue("south_spades", "279");
+    ctx.updateActionButtons(document.element("south_spades"));
+    document.setValue("south_spades", "972");
+    ctx.updateActionButtons(document.element("south_spades"));
+
+    // Assert: no solve until the debounce window elapses, then one trailing run.
+    assert.equal(ddRuns, 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(ddRuns, 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(ddRuns, 1);
+});
+
+test("scheduleDealSolveDebounced does not return an awaitable for the trailing solve", () => {
+    // Arrange: non-zero debounce so the timer path is used (not the sync fallback).
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    ctx.refreshDdTable = async () => {};
+
+    // Act
+    const returned = ctx.scheduleDealSolveDebounced();
+
+    // Assert: callers must not treat the return as "debounced work finished".
+    assert.equal(returned, undefined);
+});
+
+test("disabling debounce cancels a pending debounced solve", async () => {
+    // Arrange: complete deal with a pending trailing hand-edit solve.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(100);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    document.setValue("south_spades", "927");
+    ctx.updateActionButtons(document.element("south_spades"));
+    assert.equal(ddRuns, 0);
+
+    // Act: disable debounce while the timer is still pending.
+    ctx.setDealSolveDebounceMs(0);
+
+    // Assert: the previously scheduled trailing solve must not fire.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(ddRuns, 0);
+});
+
+test("contract selection still schedules a deal solve immediately", async () => {
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+    ctx.fillFormWithPartScoreTestData();
+    // fillForm completes the deal, which schedules immediately (not debounced).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    ctx.handleResultTableClick({
+        target: {
+            closest() {
+                return document.element("result-table").rows[3].cells[5];
+            },
+        },
+    });
+
+    // Contract click must not wait for the hand-edit debounce.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+});
+
+test("fourth-hand auto-fill schedules a solve immediately despite debounce", async () => {
+    // Arrange: three complete hands; completing the third triggers auto-fill.
+    const document = threeHandsPartScoreDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+
+    // Act
+    ctx.updateActionButtons();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert: West is filled and the DD solve does not wait for debounce.
+    assert.equal(document.element("west_spades").value, "K643");
+    assert.equal(ddRuns, 1);
+});
+
+test("completing the fourth hand manually schedules a solve immediately", async () => {
+    // Arrange: South is one card short of a complete deal.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    document.setValue("south_spades", "97"); // was 972; now 12 cards in South
+    ctx.updateActionButtons(document.element("south_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+
+    // Act: type the final pip that restores 13 cards.
+    document.setValue("south_spades", "972");
+    ctx.updateActionButtons(document.element("south_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert
+    assert.equal(ddRuns, 1);
+});
+
+test("breaking a complete deal clears DD results immediately despite debounce", async () => {
+    // Arrange: complete deal with populated results; deleting a card must not
+    // leave stale DD numerals visible for the debounce window.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    document.element("result").innerHTML = "Solved in 12 ms.";
+    document.element("result-table").innerHTML =
+        "<tr><td>N</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>";
+
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+        // Mirror production: incomplete deals clear immediately.
+        document.element("result").innerHTML = "";
+        document.element("result-table").innerHTML = "";
+    };
+
+    // Act: remove a card so the deal is no longer complete.
+    document.setValue("south_spades", "97");
+    ctx.updateActionButtons(document.element("south_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert: clear path runs now, not after the debounce delay.
+    assert.equal(ddRuns, 1);
+    assert.equal(document.element("result").innerHTML, "");
+    assert.equal(document.element("result-table").innerHTML, "");
+});
+
+test("edits that keep the deal incomplete refresh immediately despite debounce", async () => {
+    // Arrange: incomplete deal; clear/error updates are cheap (no WASM) and
+    // must stay responsive so validation/status does not linger.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+
+    document.setValue("north_spades", "A");
+    ctx.updateActionButtons(document.element("north_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    // Act: another still-incomplete edit.
+    document.setValue("north_spades", "AK");
+    ctx.updateActionButtons(document.element("north_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert: not deferred by the hand-edit debounce window.
+    assert.equal(ddRuns, 1);
 });
 
 test("pageLoad shows valid pips", () => {
@@ -1293,6 +1506,51 @@ test("refreshDdTable clears the results table when the deal is incomplete", () =
     // Assert
     assert.equal(cell.innerHTML, "");
     assert.equal(document.element("result").innerHTML, "");
+});
+
+test("formatSolveTimeMs rounds wall time to whole milliseconds", () => {
+    const ctx = loadDdsWeb(createMockDocument());
+
+    assert.equal(ctx.formatSolveTimeMs(0), "Solved in 0 ms.");
+    assert.equal(ctx.formatSolveTimeMs(0.4), "Solved in 0 ms.");
+    assert.equal(ctx.formatSolveTimeMs(0.5), "Solved in 1 ms.");
+    assert.equal(ctx.formatSolveTimeMs(12.3), "Solved in 12 ms.");
+    assert.equal(ctx.formatSolveTimeMs(41.9), "Solved in 42 ms.");
+});
+
+test("refreshDdTable shows wall solve time in ms after a successful solve", async () => {
+    // Arrange: full part-score deal; mock WASM and a clock that advances 12.4 ms.
+    let clock = 1000;
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document, {
+        performance: {
+            now() {
+                return clock;
+            },
+        },
+    });
+    ctx.fillFormWithPartScoreTestData();
+    ctx.loadDdsModule = async () => ({
+        _malloc: () => 0,
+        _free() {},
+        ccall() {
+            clock += 12.4;
+            return 1;
+        },
+        getValue() {
+            return 7;
+        },
+    });
+
+    // Act
+    await ctx.refreshDdTable();
+
+    // Assert
+    assert.equal(document.element("result").innerHTML, "Solved in 12 ms.");
+    assert.equal(
+        String(document.element("result-table").rows[1].cells[1].innerHTML),
+        "7"
+    );
 });
 
 test("updateActionButtons displays all 52 cards in the deck status", () => {
@@ -3060,11 +3318,28 @@ test("result table lives in the hand diagram southeast corner", () => {
         /result-table-hint[\s\S]*?id="result-table"/
     );
     assert.match(afterSe, /id="result-table"/);
+    // Solve status (Computing… / wall time / errors) sits under the table in
+    // the SE cell so it is visible next to the results users are watching.
+    assert.match(
+        afterSe,
+        /id="result-table"[\s\S]*?<p\b[^>]*\bid="result"[^>]*>/
+    );
+    assert.match(
+        afterSe,
+        /<p\b[^>]*\bid="result"[^>]*\baria-live="polite"/
+    );
+    // Only one #result, and it is not left below the diagram.
+    assert.equal((html.match(/\bid="result"/g) || []).length, 1);
+    assert.doesNotMatch(
+        html.slice(html.indexOf("</div>\n    </div>\n    </div>")),
+        /id="result"/
+    );
     // SE cell must be readable (not aria-hidden) and sized for the table.
     assert.doesNotMatch(seOpen[0], /aria-hidden="true"/);
     assert.match(css, /\.grid-item\.grid-filler-se\s*\{[^}]*font-size:/s);
     assert.match(css, /\.grid-item\.grid-filler-se\s*\{[^}]*flex-direction:\s*column/s);
     assert.match(css, /\.result-table-hint\s*\{/s);
+    assert.match(css, /#result\s*\{/s);
 });
 
 test("contract status lives in the hand diagram northeast corner", () => {

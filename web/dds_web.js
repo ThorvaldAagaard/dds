@@ -25,6 +25,7 @@
             refreshDdTable
             refreshOpeningLeadTricks
             scheduleDealSolve
+            setDealSolveDebounceMs
             fourthHandFillState
             updateActionButtons
             sanitizeSuitHolding
@@ -65,6 +66,7 @@
             pipFromDdsRank
             leadTricksMapFromSolverOutput
             wasmSolveEnvironmentError
+            formatSolveTimeMs
             */
 
 // It's also useful to pass the code through
@@ -89,6 +91,13 @@ let lastDdTablePbn = null;
 let solveQueue = Promise.resolve();
 let dealSolveEpoch = 0;
 let dealSolveQueued = false;
+// Delay WASM work after hand edits so typing on a complete deal does not
+// freeze the UI on every keystroke (sync ccall). Contract clicks stay immediate.
+let dealSolveDebounceMs = 250;
+let dealSolveDebounceTimer = null;
+// Track completeness so the first transition to a full deal solves immediately
+// (auto-fill / final pip), while further edits of that deal stay debounced.
+let lastDealWasComplete = false;
 
 function enqueueSolve(task) {
     const run = solveQueue.then(task, task);
@@ -98,10 +107,45 @@ function enqueueSolve(task) {
     return run;
 }
 
+function setDealSolveDebounceMs(ms) {
+    dealSolveDebounceMs = ms;
+
+    // Disabling debounce must not leave a previously scheduled trailing solve
+    // to fire later with the old delay.
+    if (ms <= 0 && dealSolveDebounceTimer != null) {
+        clearTimeout(dealSolveDebounceTimer);
+        dealSolveDebounceTimer = null;
+    }
+}
+
+function scheduleDealSolveDebounced() {
+    if (dealSolveDebounceTimer != null) {
+        clearTimeout(dealSolveDebounceTimer);
+        dealSolveDebounceTimer = null;
+    }
+
+    if (dealSolveDebounceMs <= 0) {
+        void scheduleDealSolve();
+        return;
+    }
+
+    dealSolveDebounceTimer = setTimeout(() => {
+        dealSolveDebounceTimer = null;
+        void scheduleDealSolve();
+    }, dealSolveDebounceMs);
+}
+
 // Coalesce DD-table + lead solves onto one queued job so rapid hand edits and
 // contract clicks cannot interleave CalcDDtable with SolveBoard, and so
 // intermediate schedules do not each add a stale promise-chain callback.
 function scheduleDealSolve() {
+    // A direct schedule (contract click, etc.) supersedes a pending debounced
+    // hand-edit solve so we do not fire a redundant trailing job afterward.
+    if (dealSolveDebounceTimer != null) {
+        clearTimeout(dealSolveDebounceTimer);
+        dealSolveDebounceTimer = null;
+    }
+
     dealSolveEpoch += 1;
 
     if (dealSolveQueued) {
@@ -2042,7 +2086,20 @@ function updateActionButtons(activeElement) {
 
     updateHandCardDisplays(hands);
 
-    void scheduleDealSolve();
+    const dealComplete = allHandsHaveThirteenCards(hands) &&
+        inputIsValid(hands).length === 0;
+
+    // Debounce only while the deal stays solvable so typing on a complete deal
+    // does not sync-ccall on every keystroke. Incomplete/invalid edits (and the
+    // first transition to a complete deal) schedule immediately: clear/error
+    // updates are cheap, and first completion should feel instant.
+    if (dealComplete && lastDealWasComplete) {
+        void scheduleDealSolveDebounced();
+    } else {
+        void scheduleDealSolve();
+    }
+
+    lastDealWasComplete = dealComplete;
 }
 
 function collectHands() {
@@ -2156,6 +2213,11 @@ function clear_results() {
     }
 }
 
+/** Format wall elapsed time for the status line (whole milliseconds). */
+function formatSolveTimeMs(elapsedMs) {
+    return "Solved in " + Math.round(elapsedMs) + " ms.";
+}
+
 async function refreshDdTable() {
     const requestId = ++ddTableRequestId;
     const result = document.getElementById("result");
@@ -2203,12 +2265,14 @@ async function refreshDdTable() {
         const outPtr = module._malloc(20 * 4);
 
         try {
+            const startedAt = performance.now();
             const rc = module.ccall(
                 "dds_web_calc_table",
                 "number",
                 ["string", "number"],
                 [pbn, outPtr]
             );
+            const elapsedMs = performance.now() - startedAt;
 
             if (requestId !== ddTableRequestId) {
                 return;
@@ -2240,7 +2304,7 @@ async function refreshDdTable() {
             lastDdTablePbn = pbn;
 
             if (result) {
-                result.innerHTML = "";
+                result.innerHTML = formatSolveTimeMs(elapsedMs);
             }
         } finally {
             module._free(outPtr);
