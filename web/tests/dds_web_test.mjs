@@ -731,6 +731,20 @@ test("subsequent edits of a still-complete deal are debounced", async () => {
     assert.equal(ddRuns, 1);
 });
 
+test("scheduleDealSolveDebounced does not return an awaitable for the trailing solve", () => {
+    // Arrange: non-zero debounce so the timer path is used (not the sync fallback).
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    ctx.refreshDdTable = async () => {};
+
+    // Act
+    const returned = ctx.scheduleDealSolveDebounced();
+
+    // Assert: callers must not treat the return as "debounced work finished".
+    assert.equal(returned, undefined);
+});
+
 test("contract selection still schedules a deal solve immediately", async () => {
     const document = createMockDocument();
     const ctx = loadDdsWeb(document);
@@ -740,8 +754,9 @@ test("contract selection still schedules a deal solve immediately", async () => 
         ddRuns += 1;
     };
     ctx.fillFormWithPartScoreTestData();
-    // Let the debounced fillForm solve fire, then reset.
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // fillForm completes the deal, which schedules immediately (not debounced).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
     ddRuns = 0;
 
     ctx.handleResultTableClick({

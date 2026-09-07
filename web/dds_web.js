@@ -26,7 +26,6 @@
             refreshOpeningLeadTricks
             scheduleDealSolve
             setDealSolveDebounceMs
-            scheduleDealSolveDebounced
             fourthHandFillState
             updateActionButtons
             sanitizeSuitHolding
@@ -119,15 +118,14 @@ function scheduleDealSolveDebounced() {
     }
 
     if (dealSolveDebounceMs <= 0) {
-        return scheduleDealSolve();
+        void scheduleDealSolve();
+        return;
     }
 
     dealSolveDebounceTimer = setTimeout(() => {
         dealSolveDebounceTimer = null;
         scheduleDealSolve();
     }, dealSolveDebounceMs);
-
-    return solveQueue;
 }
 
 // Coalesce DD-table + lead solves onto one queued job so rapid hand edits and
