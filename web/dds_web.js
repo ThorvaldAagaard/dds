@@ -124,7 +124,7 @@ function scheduleDealSolveDebounced() {
 
     dealSolveDebounceTimer = setTimeout(() => {
         dealSolveDebounceTimer = null;
-        scheduleDealSolve();
+        void scheduleDealSolve();
     }, dealSolveDebounceMs);
 }
 
