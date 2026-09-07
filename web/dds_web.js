@@ -109,6 +109,13 @@ function enqueueSolve(task) {
 
 function setDealSolveDebounceMs(ms) {
     dealSolveDebounceMs = ms;
+
+    // Disabling debounce must not leave a previously scheduled trailing solve
+    // to fire later with the old delay.
+    if (ms <= 0 && dealSolveDebounceTimer != null) {
+        clearTimeout(dealSolveDebounceTimer);
+        dealSolveDebounceTimer = null;
+    }
 }
 
 function scheduleDealSolveDebounced() {

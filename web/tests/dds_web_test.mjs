@@ -745,6 +745,32 @@ test("scheduleDealSolveDebounced does not return an awaitable for the trailing s
     assert.equal(returned, undefined);
 });
 
+test("disabling debounce cancels a pending debounced solve", async () => {
+    // Arrange: complete deal with a pending trailing hand-edit solve.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(100);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    document.setValue("south_spades", "927");
+    ctx.updateActionButtons(document.element("south_spades"));
+    assert.equal(ddRuns, 0);
+
+    // Act: disable debounce while the timer is still pending.
+    ctx.setDealSolveDebounceMs(0);
+
+    // Assert: the previously scheduled trailing solve must not fire.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(ddRuns, 0);
+});
+
 test("contract selection still schedules a deal solve immediately", async () => {
     const document = createMockDocument();
     const ctx = loadDdsWeb(document);
