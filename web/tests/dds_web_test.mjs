@@ -875,6 +875,32 @@ test("breaking a complete deal clears DD results immediately despite debounce", 
     assert.equal(document.element("result-table").innerHTML, "");
 });
 
+test("edits that keep the deal incomplete refresh immediately despite debounce", async () => {
+    // Arrange: incomplete deal; clear/error updates are cheap (no WASM) and
+    // must stay responsive so validation/status does not linger.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+    };
+
+    document.setValue("north_spades", "A");
+    ctx.updateActionButtons(document.element("north_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(ddRuns, 1);
+    ddRuns = 0;
+
+    // Act: another still-incomplete edit.
+    document.setValue("north_spades", "AK");
+    ctx.updateActionButtons(document.element("north_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert: not deferred by the hand-edit debounce window.
+    assert.equal(ddRuns, 1);
+});
+
 test("pageLoad shows valid pips", () => {
     const document = createMockDocument();
     const ctx = loadDdsWeb(document);

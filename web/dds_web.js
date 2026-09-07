@@ -2089,15 +2089,14 @@ function updateActionButtons(activeElement) {
     const dealComplete = allHandsHaveThirteenCards(hands) &&
         inputIsValid(hands).length === 0;
 
-    // Solve as soon as the deal first becomes complete (fourth-hand auto-fill
-    // or the final pip). Clear immediately when a complete deal becomes
-    // incomplete so stale DD numerals do not linger for the debounce window.
-    // Debounce only subsequent edits that stay in the same completeness state
-    // so typing does not sync-ccall on every keystroke.
-    if (dealComplete !== lastDealWasComplete) {
-        void scheduleDealSolve();
-    } else {
+    // Debounce only while the deal stays solvable so typing on a complete deal
+    // does not sync-ccall on every keystroke. Incomplete/invalid edits (and the
+    // first transition to a complete deal) schedule immediately: clear/error
+    // updates are cheap, and first completion should feel instant.
+    if (dealComplete && lastDealWasComplete) {
         void scheduleDealSolveDebounced();
+    } else {
+        void scheduleDealSolve();
     }
 
     lastDealWasComplete = dealComplete;
