@@ -700,8 +700,9 @@ test("rapid scheduleDealSolve does not enqueue one queue job per call", async ()
     assert.ok(ddRuns >= 2);
 });
 
-test("hand-edit solves are debounced so rapid typing does not start WASM immediately", async () => {
-    // Arrange: complete deal; each keystroke would otherwise sync-ccall and freeze.
+test("subsequent edits of a still-complete deal are debounced", async () => {
+    // Arrange: complete deal; reordering pips keeps the deal complete so each
+    // keystroke would otherwise schedule a solve immediately.
     const document = createMockDocument();
     const ctx = loadDdsWeb(document);
     ctx.setDealSolveDebounceMs(50);
@@ -714,10 +715,10 @@ test("hand-edit solves are debounced so rapid typing does not start WASM immedia
     assert.equal(ddRuns, 1);
     ddRuns = 0;
 
-    // Act: burst of hand edits (as when typing into South on a full deal).
-    document.setValue("south_spades", "972A");
+    // Act: burst of still-complete edits (reorder South's spade holding).
+    document.setValue("south_spades", "927");
     ctx.updateActionButtons(document.element("south_spades"));
-    document.setValue("south_spades", "972AK");
+    document.setValue("south_spades", "279");
     ctx.updateActionButtons(document.element("south_spades"));
     document.setValue("south_spades", "972");
     ctx.updateActionButtons(document.element("south_spades"));
@@ -799,6 +800,38 @@ test("completing the fourth hand manually schedules a solve immediately", async 
 
     // Assert
     assert.equal(ddRuns, 1);
+});
+
+test("breaking a complete deal clears DD results immediately despite debounce", async () => {
+    // Arrange: complete deal with populated results; deleting a card must not
+    // leave stale DD numerals visible for the debounce window.
+    const document = createMockDocument();
+    const ctx = loadDdsWeb(document);
+    ctx.setDealSolveDebounceMs(200);
+    ctx.fillFormWithPartScoreTestData();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    document.element("result").innerHTML = "Solved in 12 ms.";
+    document.element("result-table").innerHTML =
+        "<tr><td>N</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>";
+
+    let ddRuns = 0;
+    ctx.refreshDdTable = async () => {
+        ddRuns += 1;
+        // Mirror production: incomplete deals clear immediately.
+        document.element("result").innerHTML = "";
+        document.element("result-table").innerHTML = "";
+    };
+
+    // Act: remove a card so the deal is no longer complete.
+    document.setValue("south_spades", "97");
+    ctx.updateActionButtons(document.element("south_spades"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Assert: clear path runs now, not after the debounce delay.
+    assert.equal(ddRuns, 1);
+    assert.equal(document.element("result").innerHTML, "");
+    assert.equal(document.element("result-table").innerHTML, "");
 });
 
 test("pageLoad shows valid pips", () => {

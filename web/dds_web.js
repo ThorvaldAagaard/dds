@@ -2085,9 +2085,11 @@ function updateActionButtons(activeElement) {
         inputIsValid(hands).length === 0;
 
     // Solve as soon as the deal first becomes complete (fourth-hand auto-fill
-    // or the final pip). Debounce only subsequent edits of a complete deal so
-    // typing does not sync-ccall on every keystroke.
-    if (dealComplete && !lastDealWasComplete) {
+    // or the final pip). Clear immediately when a complete deal becomes
+    // incomplete so stale DD numerals do not linger for the debounce window.
+    // Debounce only subsequent edits that stay in the same completeness state
+    // so typing does not sync-ccall on every keystroke.
+    if (dealComplete !== lastDealWasComplete) {
         void scheduleDealSolve();
     } else {
         void scheduleDealSolveDebounced();
